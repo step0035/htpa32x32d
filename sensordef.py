@@ -110,4 +110,14 @@ STATUS_REGISTER = 0x02
 TOP_HALF = 0x0A
 BOTTOM_HALF = 0x0B
 
-#----Look-up Table----
+#----Table----
+TABLENUMBER = 113
+PCSCALEVAL = 100000000 #PixelConst scale value for table... lower 'L' for (long)
+NROFTAELEMENTS = 7
+NROFADELEMENTS = 1595  #130 possible due to Program memory, higher values possible if NROFTAELEMENTS is decreased
+TAEQUIDISTANCE = 100   #dK
+ADEQUIDISTANCE = 64    #dig
+ADEXPBITS = 6 #2^ADEXPBITS=ADEQUIDISTANCE
+TABLEOFFSET = 1024
+MBITTRIMDefault = 0x2C
+SensRv = 1
