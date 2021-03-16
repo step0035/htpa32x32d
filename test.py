@@ -55,6 +55,17 @@ def calc_timer_duration(bw, clk, mbit):
 def main(board):
     start_time = time.time()
 
+    global eeprom
+    global data_top_block0, data_top_block1, data_top_block2, data_top_block3
+    global data_bottom_block0, data_bottom_block1, data_bottom_block2, data_bottom_block3
+    global electrical_offset_top, electrical_offset_bottom
+    global eloffset
+    global ptat_top_block0, ptat_top_block1, ptat_top_block2, ptat_top_block3
+    global ptat_bottom_block0, ptat_bottom_block1, ptat_bottom_block2, ptat_bottom_block3
+    global vdd_top_block0, vdd_top_block1, vdd_top_block2, vdd_top_block3
+    global vdd_bottom_block0, vdd_bottom_block1, vdd_bottom_block2, vdd_bottom_block3
+    global data_pixel
+    global statusreg
     #initialize i2c pins
     print("Initializing...")
     board.set_pin_mode_i2c()
@@ -67,7 +78,6 @@ def main(board):
     number_pixel = 1024
 
     #read eeprom data
-    global eeprom
 
     if os.path.isfile("./eeprom.txt"):
         print("Getting EEPROM from cache")
@@ -77,9 +87,14 @@ def main(board):
                 value = int(line[:-1]) # remove last character which is newline
                 eeprom.append(value)
     else:
-        print("Reading EEPROM data...")
-        for i in range(0x1F3F+1):
-            read_eeprom(i)
+        while True:
+            print("Reading EEPROM data...")
+            for i in range(0x1F3F+1):
+                read_eeprom(i)
+            print(len(eeprom))
+            if len(eeprom)==8000:
+                break
+            eeprom = []
 
         print("Caching")
         with open('eeprom.txt', 'w') as filehandle:
@@ -276,6 +291,9 @@ def main(board):
 board = pymata4.Pymata4()
 try:
     eeprom = []
+    data_top_block0, data_top_block1, data_top_block2, data_top_block3 = [], [], [], []
+    
+
     main(board)
 except KeyboardInterrupt:
     board.shutdown()

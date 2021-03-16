@@ -7,6 +7,7 @@ import os
 
 def read_eeprom(ee_regADD):
     board.i2c_write(EEPROM_ADDRESS, [ee_regADD>>8, ee_regADD])
+    time.sleep(0.015)
     board.i2c_read(EEPROM_ADDRESS, register=None, number_of_bytes=1, callback=eeprom_callback)
     time.sleep(0.015)
 
@@ -16,15 +17,6 @@ def eeprom_callback(data):
 
 def wake_sensor():
     board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x01])
-
-def write_sensor_calib_settings():
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER1, mbit_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER2, bias_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER3, bias_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER4, clk_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER5, bpa_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER6, bpa_calib])
-    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER7, pu_calib])
 
 def start_sensor():
     board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
@@ -41,11 +33,33 @@ def calc_timer_duration(bw, clk, mbit):
     c /= bw
     c *= SAFETY_FAC
     calculated_timer_duration = c * 1000000 #c in  s | timer_duration in µs
-
     return calculated_timer_duration
+
+def read_sensor(regADD, num_bytes, cb):
+    board.i2c_read_restart_transmission(SENSOR_ADDRESS, register=regADD, number_of_bytes=num_bytes, callback=cb)
+    time.sleep(2)
+
+def cb_statusreg(data):
+    global statusreg
+    print(data)
+    statusreg = data[-2]
 
 def main(board):
     start_time = time.time()
+
+    #initialize global variables
+    global eeprom
+
+    # global data_top_block0, data_top_block1, data_top_block2, data_top_block3
+    # global data_bottom_block0, data_bottom_block1, data_bottom_block2, data_bottom_block3
+    # global electrical_offset_top, electrical_offset_bottom
+    # global eloffset
+    # global ptat_top_block0, ptat_top_block1, ptat_top_block2, ptat_top_block3
+    # global ptat_bottom_block0, ptat_bottom_block1, ptat_bottom_block2, ptat_bottom_block3
+    # global vdd_top_block0, vdd_top_block1, vdd_top_block2, vdd_top_block3
+    # global vdd_bottom_block0, vdd_bottom_block1, vdd_bottom_block2, vdd_bottom_block3
+    # global data_pixel
+    # global statusreg
 
     #initialize i2c pins
     print("Initializing...")
@@ -59,8 +73,6 @@ def main(board):
     number_pixel = 1024
 
     #read eeprom data
-    global eeprom
-
     if os.path.isfile("./eeprom.txt"):
         print("Getting EEPROM from cache...")
         with open('eeprom.txt', 'r') as filehandle:
@@ -263,13 +275,19 @@ def main(board):
         pij[16][i] = eeprom[E_PIJ + 0x0700 + 3 * 64 + 2 * i + 1]<<8 | eeprom[E_PIJ + 0x0700 + 3 * 64 + 2 * i]
 
     #wake sensor
-    #wake_sensor()
+    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x01])
 
     #write calibration settings to sensor
-    #write_sensor_calib_settings()
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER1, mbit_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER2, bias_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER3, bias_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER4, clk_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER5, bpa_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER6, bpa_calib])
+    board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER7, pu_calib])
 
     #start sensor
-    #start_sensor()
+    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
 
     #other calculations before main loop
     gradscale_div = 2**eeprom[E_GRADSCALE]
@@ -300,14 +318,25 @@ def main(board):
     print(f"Setup time elapse: {time.time()-start_time}")
 
     #Start of loop
-    #while True: (dont use loop for tesing first)
 
+    #while True: (dont use loop for tesing first)
+    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
+    time.sleep(timer_duration/(10**6)) #wait for end of conversion bit
+    read_sensor(STATUS_REGISTER, 1, cb_statusreg) #read status register
+    while statusreg%2==0:
+        read_sensor(STATUS_REGISTER, 1, cb_statusreg) #keep reading status register until conversion has finished
+    print("conversion finished")
+    
 
 
     
 board = pymata4.Pymata4()
 try:
     eeprom = []
+    data_top_block0, data_top_block1, data_top_block2, data_top_block3 = [], [], [], []
+    data_bottom_block0, data_bottom_block1, data_bottom_block2, data_bottom_block3 = [], [], [], []
+    statusreg = 0
+    configregister = 0
     main(board)
 except KeyboardInterrupt:
     board.shutdown()
