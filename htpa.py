@@ -44,14 +44,6 @@ def calc_timer_duration(bw, clk, mbit):
 
     return calculated_timer_duration
 
-# def calculate_pixcij():
-#     pixcij_int32 = np.zeros(shape=(32,32))
-#     for m in range(32):
-#         for n in range(32):
-#             pixcij_int32[m][n] = pixcmax - pixcmin
-#             pixcij_int32[m][n] = pixcij_int32[m][n] / 65535
-#             pixcij_int32[m][n] = pixcij_int32[m][n] * 
-
 def main(board):
     start_time = time.time()
 
@@ -70,6 +62,7 @@ def main(board):
     global eeprom
 
     if os.path.isfile("./eeprom.txt"):
+        print("Getting EEPROM from cache...")
         with open('eeprom.txt', 'r') as filehandle:
             filecontents = filehandle.readlines()
             for line in filecontents:
@@ -77,15 +70,16 @@ def main(board):
                 eeprom.append(value)
     else:
         print("Reading EEPROM data...")
-        for i in range(0x1F3F):
+        for i in range(0x1F3F+1):
             read_eeprom(i)
 
+        print("Caching...")
         with open('eeprom.txt', 'w') as filehandle:
             for value in eeprom:
                 filehandle.write('%s\n' %value)
 
-    print(eeprom)
-    print(len(eeprom))
+    #print(eeprom)
+    print(f"EEPROM length: {len(eeprom)}")
 
     bw = (eeprom[E_BW2]<<8 | eeprom[E_BW1]) / 100
     device_id = eeprom[E_ID4]<<24 | eeprom[E_ID3]<<16 | eeprom[E_ID2]<<8 | eeprom[E_ID1] #changed from id
@@ -281,9 +275,19 @@ def main(board):
     gradscale_div = 2**eeprom[E_GRADSCALE]
     vddscgrad_div = 2**eeprom[E_VDDSCGRAD]
     vddscoff_div = 2**eeprom[E_VDDSCOFF]
+    pixcij_int32 = np.zeros(shape=(32,32)) #calculate_pixcij() ==> calc sensitivity coefficients (datasheet chapter 11.5)
+    for m in range(32):
+        for n in range(32):
+            pixcij_int32[m][n] = pixcmax - pixcmin
+            pixcij_int32[m][n] = pixcij_int32[m][n] / 65535
+            pixcij_int32[m][n] = pixcij_int32[m][n] * pij[m][n]
+            pixcij_int32[m][n] = pixcij_int32[m][n] * pixcmin
+            pixcij_int32[m][n] = pixcij_int32[m][n] * 1.0 * epsilon / 100
+            pixcij_int32[m][n] = pixcij_int32[m][n] * 1.0 * globalgain / 10000
 
     #get timer duration
     timer_duration = calc_timer_duration(bw, clk_calib, mbit_calib)
+    print(f"Timer duration: {timer_duration}")
 
     #check tablenumber
     if tablenumber!=TABLENUMBER:
@@ -292,14 +296,11 @@ def main(board):
         print("Change device in sensordef.py to sensor with tablenumber: ", tablenumber)
 
     #check buffer length
-    
-    # print(ptatoff_float)
-    # print(ptatgr_float)
-    # print(pixcmax)
-    # print(pixcmin)
-    # print(id)
 
-    print(f"Execution duration: {time.time()-start_time}")
+    print(f"Setup time elapse: {time.time()-start_time}")
+
+    #Start of loop
+    #while True: (dont use loop for tesing first)
 
 
 
