@@ -1,207 +1,212 @@
 /*
- * TwoWire.h - TWI/I2C library for Arduino Due
- * Copyright (c) 2011 Cristian Maglie <c.maglie@arduino.cc>
- * All rights reserved.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- */
+  TwoWire.cpp - TWI/I2C library for Wiring & Arduino
+  Copyright (c) 2006 Nicholas Zambetti.  All right reserved.
+
+  This library is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2.1 of the License, or (at your option) any later version.
+
+  This library is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ 
+  Modified 2012 by Todd Krein (todd@krein.org) to implement repeated starts
+  Modified 2017 by Chuck Todd (ctodd@cableone.net) to correct Unconfigured Slave Mode reboot
+  Modified 2020 by Greyson Christoforo (grey@christoforo.net) to implement timeouts
+*/
 
 extern "C" {
-#include <string.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include <inttypes.h>
+  #include "utility/twi.h"
 }
 
 #include "Wire.h"
 
-static inline bool TWI_FailedAcknowledge(Twi *pTwi) {
-	return pTwi->TWI_SR & TWI_SR_NACK;
+// Initialize Class Variables //////////////////////////////////////////////////
+
+uint8_t TwoWire::rxBuffer[BUFFER_LENGTH];
+uint8_t TwoWire::rxBufferIndex = 0;
+uint8_t TwoWire::rxBufferLength = 0;
+
+uint8_t TwoWire::txAddress = 0;
+uint8_t TwoWire::txBuffer[BUFFER_LENGTH];
+uint8_t TwoWire::txBufferIndex = 0;
+uint8_t TwoWire::txBufferLength = 0;
+
+uint8_t TwoWire::transmitting = 0;
+void (*TwoWire::user_onRequest)(void);
+void (*TwoWire::user_onReceive)(int);
+
+// Constructors ////////////////////////////////////////////////////////////////
+
+TwoWire::TwoWire()
+{
 }
 
-static inline bool TWI_WaitTransferComplete(Twi *_twi, uint32_t _timeout) {
-	uint32_t _status_reg = 0;
-	while ((_status_reg & TWI_SR_TXCOMP) != TWI_SR_TXCOMP) {
-		_status_reg = TWI_GetStatus(_twi);
+// Public Methods //////////////////////////////////////////////////////////////
 
-		if (_status_reg & TWI_SR_NACK)
-			return false;
+void TwoWire::begin(void)
+{
+  rxBufferIndex = 0;
+  rxBufferLength = 0;
 
-		if (--_timeout == 0)
-			return false;
-	}
-	return true;
+  txBufferIndex = 0;
+  txBufferLength = 0;
+
+  twi_init();
+  twi_attachSlaveTxEvent(onRequestService); // default callback must exist
+  twi_attachSlaveRxEvent(onReceiveService); // default callback must exist
 }
 
-static inline bool TWI_WaitByteSent(Twi *_twi, uint32_t _timeout) {
-	uint32_t _status_reg = 0;
-	while ((_status_reg & TWI_SR_TXRDY) != TWI_SR_TXRDY) {
-		_status_reg = TWI_GetStatus(_twi);
-
-		if (_status_reg & TWI_SR_NACK)
-			return false;
-
-		if (--_timeout == 0)
-			return false;
-	}
-
-	return true;
+void TwoWire::begin(uint8_t address)
+{
+  begin();
+  twi_setAddress(address);
 }
 
-static inline bool TWI_WaitByteReceived(Twi *_twi, uint32_t _timeout) {
-	uint32_t _status_reg = 0;
-	while ((_status_reg & TWI_SR_RXRDY) != TWI_SR_RXRDY) {
-		_status_reg = TWI_GetStatus(_twi);
-
-		if (_status_reg & TWI_SR_NACK)
-			return false;
-
-		if (--_timeout == 0)
-			return false;
-	}
-
-	return true;
+void TwoWire::begin(int address)
+{
+  begin((uint8_t)address);
 }
 
-static inline bool TWI_STATUS_SVREAD(uint32_t status) {
-	return (status & TWI_SR_SVREAD) == TWI_SR_SVREAD;
+void TwoWire::end(void)
+{
+  twi_disable();
 }
 
-static inline bool TWI_STATUS_SVACC(uint32_t status) {
-	return (status & TWI_SR_SVACC) == TWI_SR_SVACC;
+void TwoWire::setClock(uint32_t clock)
+{
+  twi_setFrequency(clock);
 }
 
-static inline bool TWI_STATUS_GACC(uint32_t status) {
-	return (status & TWI_SR_GACC) == TWI_SR_GACC;
+/***
+ * Sets the TWI timeout.
+ *
+ * This limits the maximum time to wait for the TWI hardware. If more time passes, the bus is assumed
+ * to have locked up (e.g. due to noise-induced glitches or faulty slaves) and the transaction is aborted.
+ * Optionally, the TWI hardware is also reset, which can be required to allow subsequent transactions to
+ * succeed in some cases (in particular when noise has made the TWI hardware think there is a second
+ * master that has claimed the bus).
+ *
+ * When a timeout is triggered, a flag is set that can be queried with `getWireTimeoutFlag()` and is cleared
+ * when `clearWireTimeoutFlag()` or `setWireTimeoutUs()` is called.
+ *
+ * Note that this timeout can also trigger while waiting for clock stretching or waiting for a second master
+ * to complete its transaction. So make sure to adapt the timeout to accomodate for those cases if needed.
+ * A typical timeout would be 25ms (which is the maximum clock stretching allowed by the SMBus protocol),
+ * but (much) shorter values will usually also work.
+ *
+ * In the future, a timeout will be enabled by default, so if you require the timeout to be disabled, it is
+ * recommended you disable it by default using `setWireTimeoutUs(0)`, even though that is currently
+ * the default.
+ *
+ * @param timeout a timeout value in microseconds, if zero then timeout checking is disabled
+ * @param reset_with_timeout if true then TWI interface will be automatically reset on timeout
+ *                           if false then TWI interface will not be reset on timeout
+
+ */
+void TwoWire::setWireTimeout(uint32_t timeout, bool reset_with_timeout){
+  twi_setTimeoutInMicros(timeout, reset_with_timeout);
 }
 
-static inline bool TWI_STATUS_EOSACC(uint32_t status) {
-	return (status & TWI_SR_EOSACC) == TWI_SR_EOSACC;
+/***
+ * Returns the TWI timeout flag.
+ *
+ * @return true if timeout has occured since the flag was last cleared.
+ */
+bool TwoWire::getWireTimeoutFlag(void){
+  return(twi_manageTimeoutFlag(false));
 }
 
-static inline bool TWI_STATUS_NACK(uint32_t status) {
-	return (status & TWI_SR_NACK) == TWI_SR_NACK;
+/***
+ * Clears the TWI timeout flag.
+ */
+void TwoWire::clearWireTimeoutFlag(void){
+  twi_manageTimeoutFlag(true);
 }
 
-TwoWire::TwoWire(Twi *_twi, void(*_beginCb)(void), void(*_endCb)(void)) :
-	twi(_twi), rxBufferIndex(0), rxBufferLength(0), txAddress(0),
-			txBufferLength(0), srvBufferIndex(0), srvBufferLength(0), status(
-					UNINITIALIZED), onBeginCallback(_beginCb), 
-						onEndCallback(_endCb), twiClock(TWI_CLOCK) {
+uint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity, uint32_t iaddress, uint8_t isize, uint8_t sendStop)
+{
+  if (isize > 0) {
+  // send internal address; this mode allows sending a repeated start to access
+  // some devices' internal registers. This function is executed by the hardware
+  // TWI module on other processors (for example Due's TWI_IADR and TWI_MMR registers)
+
+  beginTransmission(address);
+
+  // the maximum size of internal address is 3 bytes
+  if (isize > 3){
+    isize = 3;
+  }
+
+  // write internal register address - most significant byte first
+  while (isize-- > 0)
+    write((uint8_t)(iaddress >> (isize*8)));
+  endTransmission(false);
+  }
+
+  // clamp to buffer length
+  if(quantity > BUFFER_LENGTH){
+    quantity = BUFFER_LENGTH;
+  }
+  // perform blocking read into buffer
+  uint8_t read = twi_readFrom(address, rxBuffer, quantity, sendStop);
+  // set rx buffer iterator vars
+  rxBufferIndex = 0;
+  rxBufferLength = read;
+
+  return read;
 }
 
-void TwoWire::begin(void) {
-	if (onBeginCallback)
-		onBeginCallback();
-
-	// Disable PDC channel
-	twi->TWI_PTCR = UART_PTCR_RXTDIS | UART_PTCR_TXTDIS;
-
-	TWI_ConfigureMaster(twi, twiClock, VARIANT_MCK);
-	status = MASTER_IDLE;
+uint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity, uint8_t sendStop) {
+	return requestFrom((uint8_t)address, (uint8_t)quantity, (uint32_t)0, (uint8_t)0, (uint8_t)sendStop);
 }
 
-void TwoWire::begin(uint8_t address) {
-	if (onBeginCallback)
-		onBeginCallback();
-
-	// Disable PDC channel
-	twi->TWI_PTCR = UART_PTCR_RXTDIS | UART_PTCR_TXTDIS;
-
-	TWI_ConfigureSlave(twi, address);
-	status = SLAVE_IDLE;
-	TWI_EnableIt(twi, TWI_IER_SVACC);
-	//| TWI_IER_RXRDY | TWI_IER_TXRDY	| TWI_IER_TXCOMP);
+uint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity)
+{
+  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)true);
 }
 
-void TwoWire::begin(int address) {
-	begin((uint8_t) address);
+uint8_t TwoWire::requestFrom(int address, int quantity)
+{
+  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)true);
 }
 
-void TwoWire::end(void) {
-	TWI_Disable(twi);
-
-	// Enable PDC channel
-	twi->TWI_PTCR &= ~(UART_PTCR_RXTDIS | UART_PTCR_TXTDIS);
-
-	if (onEndCallback)
-		onEndCallback();
+uint8_t TwoWire::requestFrom(int address, int quantity, int sendStop)
+{
+  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)sendStop);
 }
 
-void TwoWire::setClock(uint32_t frequency) {
-	twiClock = frequency;
-	TWI_SetClock(twi, twiClock, VARIANT_MCK);
+void TwoWire::beginTransmission(uint8_t address)
+{
+  // indicate that we are transmitting
+  transmitting = 1;
+  // set address of targeted slave
+  txAddress = address;
+  // reset tx buffer iterator vars
+  txBufferIndex = 0;
+  txBufferLength = 0;
 }
 
-uint8_t TwoWire::requestFrom(uint8_t address, uint16_t quantity, uint32_t iaddress, uint8_t isize, uint8_t sendStop) {	// dennis: uint8_t quantity -> uint16_t quantity
-	if (quantity > BUFFER_LENGTH)
-		quantity = BUFFER_LENGTH;
-
-	// perform blocking read into buffer
-	int readed = 0;
-	TWI_StartRead(twi, address, iaddress, isize);
-	do {
-		// Stop condition must be set during the reception of last byte
-		if (readed + 1 == quantity)
-			TWI_SendSTOPCondition( twi);
-
-		if (TWI_WaitByteReceived(twi, RECV_TIMEOUT))
-			rxBuffer[readed++] = TWI_ReadByte(twi);
-		else
-			break;
-	} while (readed < quantity);
-	TWI_WaitTransferComplete(twi, RECV_TIMEOUT);
-
-	// set rx buffer iterator vars
-	rxBufferIndex = 0;
-	rxBufferLength = readed;
-
-	return readed;
-}
-
-uint8_t TwoWire::requestFrom(uint8_t address, uint16_t quantity, uint8_t sendStop) {	// dennis: uint8_t quantity -> uint16_t quantity
-	return requestFrom((uint8_t) address, (uint16_t) quantity, (uint32_t) 0, (uint8_t) 0, (uint8_t) sendStop);	// dennis: (uint8_t) quantity -> (uint16_t) quantity
-}
-
-uint8_t TwoWire::requestFrom(uint8_t address, uint16_t quantity) {	// dennis: uint8_t quantity -> uint16_t quantity
-	return requestFrom((uint8_t) address, (uint16_t) quantity, (uint8_t) true);	// dennis: uint8_t quantity -> uint16_t quantity
-}
-
-uint8_t TwoWire::requestFrom(int address, int quantity) {
-	return requestFrom((uint8_t) address, (uint16_t) quantity, (uint8_t) true);	// dennis: uint8_t quantity -> uint16_t quantity
-}
-
-uint8_t TwoWire::requestFrom(int address, int quantity, int sendStop) {
-	return requestFrom((uint8_t) address, (uint16_t) quantity, (uint8_t) sendStop);	// dennis: uint8_t quantity -> uint16_t quantity
-}
-
-void TwoWire::beginTransmission(uint8_t address) {
-	status = MASTER_SEND;
-
-	// save address of target and empty buffer
-	txAddress = address;
-	txBufferLength = 0;
-}
-
-void TwoWire::beginTransmission(int address) {
-	beginTransmission((uint8_t) address);
+void TwoWire::beginTransmission(int address)
+{
+  beginTransmission((uint8_t)address);
 }
 
 //
 //	Originally, 'endTransmission' was an f(void) function.
 //	It has been modified to take one parameter indicating
 //	whether or not a STOP should be performed on the bus.
-//	Calling endTransmission(false) allows a sketch to
-//	perform a repeated start.
+//	Calling endTransmission(false) allows a sketch to 
+//	perform a repeated start. 
 //
 //	WARNING: Nothing in the library keeps track of whether
 //	the bus tenure has been properly ended with a STOP. It
@@ -209,31 +214,16 @@ void TwoWire::beginTransmission(int address) {
 //	no call to endTransmission(true) is made. Some I2C
 //	devices will behave oddly if they do not see a STOP.
 //
-uint8_t TwoWire::endTransmission(uint8_t sendStop) {
-	uint8_t error = 0;
-	// transmit buffer (blocking)
-	TWI_StartWrite(twi, txAddress, 0, 0, txBuffer[0]);
-	if (!TWI_WaitByteSent(twi, XMIT_TIMEOUT))
-		error = 2;	// error, got NACK on address transmit
-	
-	if (error == 0) {
-		uint16_t sent = 1;
-		while (sent < txBufferLength) {
-			TWI_WriteByte(twi, txBuffer[sent++]);
-			if (!TWI_WaitByteSent(twi, XMIT_TIMEOUT))
-				error = 3;	// error, got NACK during data transmmit
-		}
-	}
-	
-	if (error == 0) {
-		TWI_Stop(twi);
-		if (!TWI_WaitTransferComplete(twi, XMIT_TIMEOUT))
-			error = 4;	// error, finishing up
-	}
-
-	txBufferLength = 0;		// empty buffer
-	status = MASTER_IDLE;
-	return error;
+uint8_t TwoWire::endTransmission(uint8_t sendStop)
+{
+  // transmit buffer (blocking)
+  uint8_t ret = twi_writeTo(txAddress, txBuffer, txBufferLength, 1, sendStop);
+  // reset tx buffer iterator vars
+  txBufferIndex = 0;
+  txBufferLength = 0;
+  // indicate that we are done transmitting
+  transmitting = 0;
+  return ret;
 }
 
 //	This provides backwards compatibility with the original
@@ -241,207 +231,148 @@ uint8_t TwoWire::endTransmission(uint8_t sendStop) {
 //
 uint8_t TwoWire::endTransmission(void)
 {
-	return endTransmission(true);
+  return endTransmission(true);
 }
 
-size_t TwoWire::write(uint8_t data) {
-	if (status == MASTER_SEND) {
-		if (txBufferLength >= BUFFER_LENGTH)
-			return 0;
-		txBuffer[txBufferLength++] = data;
-		return 1;
-	} else {
-		if (srvBufferLength >= BUFFER_LENGTH)
-			return 0;
-		srvBuffer[srvBufferLength++] = data;
-		return 1;
-	}
+// must be called in:
+// slave tx event callback
+// or after beginTransmission(address)
+size_t TwoWire::write(uint8_t data)
+{
+  if(transmitting){
+  // in master transmitter mode
+    // don't bother if buffer is full
+    if(txBufferLength >= BUFFER_LENGTH){
+      setWriteError();
+      return 0;
+    }
+    // put byte in tx buffer
+    txBuffer[txBufferIndex] = data;
+    ++txBufferIndex;
+    // update amount in buffer   
+    txBufferLength = txBufferIndex;
+  }else{
+  // in slave send mode
+    // reply to master
+    twi_transmit(&data, 1);
+  }
+  return 1;
 }
 
-size_t TwoWire::write(const uint8_t *data, size_t quantity) {
-	if (status == MASTER_SEND) {
-		for (size_t i = 0; i < quantity; ++i) {
-			if (txBufferLength >= BUFFER_LENGTH)
-				return i;
-			txBuffer[txBufferLength++] = data[i];
-		}
-	} else {
-		for (size_t i = 0; i < quantity; ++i) {
-			if (srvBufferLength >= BUFFER_LENGTH)
-				return i;
-			srvBuffer[srvBufferLength++] = data[i];
-		}
-	}
-	return quantity;
+// must be called in:
+// slave tx event callback
+// or after beginTransmission(address)
+size_t TwoWire::write(const uint8_t *data, size_t quantity)
+{
+  if(transmitting){
+  // in master transmitter mode
+    for(size_t i = 0; i < quantity; ++i){
+      write(data[i]);
+    }
+  }else{
+  // in slave send mode
+    // reply to master
+    twi_transmit(data, quantity);
+  }
+  return quantity;
 }
 
-int TwoWire::available(void) {
-	return rxBufferLength - rxBufferIndex;
+// must be called in:
+// slave rx event callback
+// or after requestFrom(address, numBytes)
+int TwoWire::available(void)
+{
+  return rxBufferLength - rxBufferIndex;
 }
 
-int TwoWire::read(void) {
-	if (rxBufferIndex < rxBufferLength)
-		return rxBuffer[rxBufferIndex++];
-	return -1;
+// must be called in:
+// slave rx event callback
+// or after requestFrom(address, numBytes)
+int TwoWire::read(void)
+{
+  int value = -1;
+  
+  // get each successive byte on each call
+  if(rxBufferIndex < rxBufferLength){
+    value = rxBuffer[rxBufferIndex];
+    ++rxBufferIndex;
+  }
+
+  return value;
 }
 
-int TwoWire::peek(void) {
-	if (rxBufferIndex < rxBufferLength)
-		return rxBuffer[rxBufferIndex];
-	return -1;
+// must be called in:
+// slave rx event callback
+// or after requestFrom(address, numBytes)
+int TwoWire::peek(void)
+{
+  int value = -1;
+  
+  if(rxBufferIndex < rxBufferLength){
+    value = rxBuffer[rxBufferIndex];
+  }
+
+  return value;
 }
 
-void TwoWire::flush(void) {
-	// Do nothing, use endTransmission(..) to force
-	// data transfer.
+void TwoWire::flush(void)
+{
+  // XXX: to be implemented.
 }
 
-void TwoWire::onReceive(void(*function)(int)) {
-	onReceiveCallback = function;
+// behind the scenes function that is called when data is received
+void TwoWire::onReceiveService(uint8_t* inBytes, int numBytes)
+{
+  // don't bother if user hasn't registered a callback
+  if(!user_onReceive){
+    return;
+  }
+  // don't bother if rx buffer is in use by a master requestFrom() op
+  // i know this drops data, but it allows for slight stupidity
+  // meaning, they may not have read all the master requestFrom() data yet
+  if(rxBufferIndex < rxBufferLength){
+    return;
+  }
+  // copy twi rx buffer into local read buffer
+  // this enables new reads to happen in parallel
+  for(uint8_t i = 0; i < numBytes; ++i){
+    rxBuffer[i] = inBytes[i];    
+  }
+  // set rx iterator vars
+  rxBufferIndex = 0;
+  rxBufferLength = numBytes;
+  // alert user program
+  user_onReceive(numBytes);
 }
 
-void TwoWire::onRequest(void(*function)(void)) {
-	onRequestCallback = function;
+// behind the scenes function that is called when data is requested
+void TwoWire::onRequestService(void)
+{
+  // don't bother if user hasn't registered a callback
+  if(!user_onRequest){
+    return;
+  }
+  // reset tx buffer iterator vars
+  // !!! this will kill any pending pre-master sendTo() activity
+  txBufferIndex = 0;
+  txBufferLength = 0;
+  // alert user program
+  user_onRequest();
 }
 
-void TwoWire::onService(void) {
-	// Retrieve interrupt status
-	uint32_t sr = TWI_GetStatus(twi);
-
-	if (status == SLAVE_IDLE && TWI_STATUS_SVACC(sr)) {
-		TWI_DisableIt(twi, TWI_IDR_SVACC);
-		TWI_EnableIt(twi, TWI_IER_RXRDY | TWI_IER_GACC | TWI_IER_NACK
-				| TWI_IER_EOSACC | TWI_IER_SCL_WS | TWI_IER_TXCOMP);
-
-		srvBufferLength = 0;
-		srvBufferIndex = 0;
-
-		// Detect if we should go into RECV or SEND status
-		// SVREAD==1 means *master* reading -> SLAVE_SEND
-		if (!TWI_STATUS_SVREAD(sr)) {
-			status = SLAVE_RECV;
-		} else {
-			status = SLAVE_SEND;
-
-			// Alert calling program to generate a response ASAP
-			if (onRequestCallback)
-				onRequestCallback();
-			else
-				// create a default 1-byte response
-				write((uint8_t) 0);
-		}
-	}
-
-	if (status != SLAVE_IDLE && TWI_STATUS_EOSACC(sr)) {
-		if (status == SLAVE_RECV && onReceiveCallback) {
-			// Copy data into rxBuffer
-			// (allows to receive another packet while the
-			// user program reads actual data)
-			for (uint8_t i = 0; i < srvBufferLength; ++i)
-				rxBuffer[i] = srvBuffer[i];
-			rxBufferIndex = 0;
-			rxBufferLength = srvBufferLength;
-
-			// Alert calling program
-			onReceiveCallback( rxBufferLength);
-		}
-
-		// Transfer completed
-		TWI_EnableIt(twi, TWI_SR_SVACC);
-		TWI_DisableIt(twi, TWI_IDR_RXRDY | TWI_IDR_GACC | TWI_IDR_NACK
-				| TWI_IDR_EOSACC | TWI_IDR_SCL_WS | TWI_IER_TXCOMP);
-		status = SLAVE_IDLE;
-	}
-
-	if (status == SLAVE_RECV) {
-		if (TWI_STATUS_RXRDY(sr)) {
-			if (srvBufferLength < BUFFER_LENGTH)
-				srvBuffer[srvBufferLength++] = TWI_ReadByte(twi);
-		}
-	}
-
-	if (status == SLAVE_SEND) {
-		if (TWI_STATUS_TXRDY(sr) && !TWI_STATUS_NACK(sr)) {
-			uint8_t c = 'x';
-			if (srvBufferIndex < srvBufferLength)
-				c = srvBuffer[srvBufferIndex++];
-			TWI_WriteByte(twi, c);
-		}
-	}
+// sets function called on slave write
+void TwoWire::onReceive( void (*function)(int) )
+{
+  user_onReceive = function;
 }
 
-#if WIRE_INTERFACES_COUNT > 0
-static void Wire_Init(void) {
-	pmc_enable_periph_clk(WIRE_INTERFACE_ID);
-	PIO_Configure(
-			g_APinDescription[PIN_WIRE_SDA].pPort,
-			g_APinDescription[PIN_WIRE_SDA].ulPinType,
-			g_APinDescription[PIN_WIRE_SDA].ulPin,
-			g_APinDescription[PIN_WIRE_SDA].ulPinConfiguration);
-	PIO_Configure(
-			g_APinDescription[PIN_WIRE_SCL].pPort,
-			g_APinDescription[PIN_WIRE_SCL].ulPinType,
-			g_APinDescription[PIN_WIRE_SCL].ulPin,
-			g_APinDescription[PIN_WIRE_SCL].ulPinConfiguration);
-
-	NVIC_DisableIRQ(WIRE_ISR_ID);
-	NVIC_ClearPendingIRQ(WIRE_ISR_ID);
-	NVIC_SetPriority(WIRE_ISR_ID, 0);
-	NVIC_EnableIRQ(WIRE_ISR_ID);
+// sets function called on slave read
+void TwoWire::onRequest( void (*function)(void) )
+{
+  user_onRequest = function;
 }
 
-static void Wire_Deinit(void) {
-	NVIC_DisableIRQ(WIRE_ISR_ID);
-	NVIC_ClearPendingIRQ(WIRE_ISR_ID);
+// Preinstantiate Objects //////////////////////////////////////////////////////
 
-	pmc_disable_periph_clk(WIRE_INTERFACE_ID);
+TwoWire Wire = TwoWire();
 
-	// no need to undo PIO_Configure, 
-	// as Peripheral A was enable by default before,
-	// and pullups were not enabled
-}
-
-TwoWire Wire = TwoWire(WIRE_INTERFACE, Wire_Init, Wire_Deinit);
-
-void WIRE_ISR_HANDLER(void) {
-	Wire.onService();
-}
-#endif
-
-#if WIRE_INTERFACES_COUNT > 1
-static void Wire1_Init(void) {
-	pmc_enable_periph_clk(WIRE1_INTERFACE_ID);
-	PIO_Configure(
-			g_APinDescription[PIN_WIRE1_SDA].pPort,
-			g_APinDescription[PIN_WIRE1_SDA].ulPinType,
-			g_APinDescription[PIN_WIRE1_SDA].ulPin,
-			g_APinDescription[PIN_WIRE1_SDA].ulPinConfiguration);
-	PIO_Configure(
-			g_APinDescription[PIN_WIRE1_SCL].pPort,
-			g_APinDescription[PIN_WIRE1_SCL].ulPinType,
-			g_APinDescription[PIN_WIRE1_SCL].ulPin,
-			g_APinDescription[PIN_WIRE1_SCL].ulPinConfiguration);
-
-	NVIC_DisableIRQ(WIRE1_ISR_ID);
-	NVIC_ClearPendingIRQ(WIRE1_ISR_ID);
-	NVIC_SetPriority(WIRE1_ISR_ID, 0);
-	NVIC_EnableIRQ(WIRE1_ISR_ID);
-}
-
-static void Wire1_Deinit(void) {
-	NVIC_DisableIRQ(WIRE1_ISR_ID);
-	NVIC_ClearPendingIRQ(WIRE1_ISR_ID);
-
-	pmc_disable_periph_clk(WIRE1_INTERFACE_ID);
-
-	// no need to undo PIO_Configure, 
-	// as Peripheral A was enable by default before,
-	// and pullups were not enabled
-}
-
-TwoWire Wire1 = TwoWire(WIRE1_INTERFACE, Wire1_Init, Wire1_Deinit);
-
-void WIRE1_ISR_HANDLER(void) {
-	Wire1.onService();
-}
-#endif

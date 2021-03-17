@@ -44,6 +44,10 @@ def cb_statusreg(data):
     print(data)
     statusreg = data[-2]
 
+def cb_data_top_block0(data):
+    global data_top_block0
+    print(data)
+
 def main(board):
     start_time = time.time()
 
@@ -320,13 +324,23 @@ def main(board):
     #Start of loop
 
     #while True: (dont use loop for tesing first)
-    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
+    #board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
     time.sleep(timer_duration/(10**6)) #wait for end of conversion bit
     read_sensor(STATUS_REGISTER, 1, cb_statusreg) #read status register
     while statusreg%2==0:
         read_sensor(STATUS_REGISTER, 1, cb_statusreg) #keep reading status register until conversion has finished
-    print("conversion finished")
     
+    read_sensor(TOP_HALF, 258, cb_data_top_block0)
+    
+    # board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x19])
+    # read_sensor(STATUS_REGISTER, 1, cb_statusreg) #read status register
+    # while statusreg%2==0:
+    #     read_sensor(STATUS_REGISTER, 1, cb_statusreg)  
+
+    # board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x29])
+    # read_sensor(STATUS_REGISTER, 1, cb_statusreg) #read status register
+    # while statusreg%2==0:
+    #     read_sensor(STATUS_REGISTER, 1, cb_statusreg)   
 
 
     

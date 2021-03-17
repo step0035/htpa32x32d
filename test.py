@@ -14,8 +14,8 @@ def eeprom_callback(data):
     global eeprom
     eeprom.append(data[-2])
 
-def wake_sensor():
-    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x01])
+# def wake_sensor():
+#     board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x01])
 
 def write_sensor_calib_settings():
     board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER1, mbit_calib])
@@ -26,8 +26,8 @@ def write_sensor_calib_settings():
     board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER6, bpa_calib])
     board.i2c_write(SENSOR_ADDRESS, [TRIM_REGISTER7, pu_calib])
 
-def start_sensor():
-    board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
+# def start_sensor():
+#     board.i2c_write(SENSOR_ADDRESS, [CONFIGURATION_REGISTER, 0x09])
 
 def to_float(num):
     num = str(bin(num))[2:]
@@ -292,7 +292,14 @@ board = pymata4.Pymata4()
 try:
     eeprom = []
     data_top_block0, data_top_block1, data_top_block2, data_top_block3 = [], [], [], []
-    
+    data_bottom_block0, data_bottom_block1, data_bottom_block2, data_bottom_block3 = [], [], [], []
+    electrical_offset_top, electrical_offset_bottom
+    eloffset
+    ptat_bottom_block0, ptat_bottom_block1, ptat_bottom_block2, ptat_bottom_block3
+    vdd_top_block0, vdd_top_block1, vdd_top_block2, vdd_top_block3
+    vdd_bottom_block0, vdd_bottom_block1, vdd_bottom_block2, vdd_bottom_block3
+    data_pixel
+    statusreg = 0
 
     main(board)
 except KeyboardInterrupt:
